@@ -1,0 +1,51 @@
+{
+  "name": "ok-agent",
+  "version": "1.0.0",
+  "description": "One command. Any agent.",
+  "type": "module",
+  "bin": {
+    "ok": "./dist/ok.js",
+    "ok-agent": "./dist/ok.js"
+  },
+  "files": [
+    "dist/ok.js"
+  ],
+  "scripts": {
+    "build": "node scripts/bundle.mjs",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsc --noEmit --watch",
+    "start": "node dist/ok.js",
+    "prepublishOnly": "pnpm run build",
+    "release": "release-it"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "agents",
+    "codex",
+    "claude",
+    "opencode",
+    "fx",
+    "coding-agent"
+  ],
+  "devDependencies": {
+    "@comark/ansi": "https://pkg.pr.new/@comark/ansi@de915aa",
+    "@types/node": "^22.20.1",
+    "esbuild": "^0.28.2",
+    "rangi": "^2.2.0",
+    "release-it": "^21.0.2",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/farnabaz/ok.git"
+  },
+  "bugs": {
+    "url": "https://github.com/farnabaz/ok/issues"
+  },
+  "homepage": "https://github.com/farnabaz/ok#readme"
+}
