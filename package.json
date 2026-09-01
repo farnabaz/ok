@@ -1,6 +1,6 @@
 {
   "name": "ok-agent",
-  "version": "1.0.0",
+  "version": "0.0.0",
   "description": "One command. Any agent.",
   "type": "module",
   "bin": {
@@ -35,9 +35,6 @@
     "rangi": "^2.2.0",
     "release-it": "^21.0.2",
     "typescript": "^5.9.3"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   },
   "license": "MIT",
   "repository": {
