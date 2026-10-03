@@ -13,6 +13,84 @@ import type {
 import { capture, runChild } from "../process.js";
 import { instructionCliArgs } from "../instructions.js";
 
+/** JSON payload from `fx ask --json` (fx ≥0.0.7 includes `final_output`). */
+interface FxAskPayload {
+  output?: string;
+  final_output?: string;
+  exit_code?: number;
+  model?: string;
+  session_id?: string;
+  error?: string;
+  resolved_provider?: string | null;
+}
+
+interface FxSettings {
+  provider?: string;
+  model?: string;
+  codex_model?: string;
+  grok_model?: string;
+  models?: Record<string, string | undefined>;
+}
+
+/** Resolve the user's current fx default model from status or settings. */
+async function resolveDefaultModelId(
+  program: string
+): Promise<string | undefined> {
+  const { code, stdout } = await capture(program, ["status", "--json"]);
+  if (code === 0) {
+    try {
+      const status = JSON.parse(stdout) as { model?: string };
+      if (typeof status.model === "string" && status.model.length > 0) {
+        return status.model;
+      }
+    } catch {
+      // fall through to settings.json
+    }
+  }
+
+  try {
+    const settingsPath = path.join(os.homedir(), ".fx", "settings.json");
+    if (!fs.existsSync(settingsPath)) return undefined;
+    const settings = JSON.parse(
+      fs.readFileSync(settingsPath, "utf-8")
+    ) as FxSettings;
+    const provider = settings.provider ?? "gateway";
+    const fromMap = settings.models?.[provider];
+    if (typeof fromMap === "string" && fromMap.length > 0) return fromMap;
+    // Legacy single-key fields still accepted by fx.
+    if (settings.model) return settings.model;
+    if (provider === "codex" && settings.codex_model) return settings.codex_model;
+    if (provider === "grok" && settings.grok_model) return settings.grok_model;
+  } catch {
+    // ignore
+  }
+
+  return undefined;
+}
+
+/** Extract the JSON object fx writes to stdout (may be preceded by notices). */
+function parseFxAskJson(stdout: string): FxAskPayload {
+  const trimmed = stdout.trim();
+  if (!trimmed) throw new Error("no json");
+
+  try {
+    return JSON.parse(trimmed) as FxAskPayload;
+  } catch {
+    // Prefer the last complete {...} block when notices precede JSON.
+    const start = trimmed.lastIndexOf("{");
+    const end = trimmed.lastIndexOf("}");
+    if (start < 0 || end < start) throw new Error("no json");
+    return JSON.parse(trimmed.slice(start, end + 1)) as FxAskPayload;
+  }
+}
+
+/** Prefer completed final response; fall back to accumulated assistant Markdown. */
+function answerFromPayload(payload: FxAskPayload): string {
+  const finalOutput = (payload.final_output ?? "").trimEnd();
+  if (finalOutput) return finalOutput;
+  return (payload.output ?? "").trimEnd();
+}
+
 export function createFx(program: string): Harness {
   return {
     async models(): Promise<Model[]> {
@@ -41,19 +119,7 @@ export function createFx(program: string): Harness {
           .filter((line) => line.includes("/") && !line.startsWith("["));
       }
 
-      // Prefer the user's current fx default first when available.
-      let defaultId: string | undefined;
-      try {
-        const settingsPath = path.join(os.homedir(), ".fx", "settings.json");
-        if (fs.existsSync(settingsPath)) {
-          const settings = JSON.parse(
-            fs.readFileSync(settingsPath, "utf-8")
-          ) as { model?: string };
-          if (settings.model) defaultId = settings.model;
-        }
-      } catch {
-        // ignore
-      }
+      const defaultId = await resolveDefaultModelId(program);
 
       const models: Model[] = ids.map((id) => {
         const slash = id.indexOf("/");
@@ -88,21 +154,28 @@ export function createFx(program: string): Harness {
       options: RunOptions,
       onDelta: (delta: string) => void
     ): Promise<HarnessResponse> {
+      // fx 0.0.11+ documents ask flags after `ask`: --model, --effort, --resume.
+      // Gateway traffic uses the coding-agent catalog/credits routes and the
+      // v4 language-model chat endpoint; CLI surface is unchanged aside from
+      // preferring these flags and reading `final_output` from --json.
       const args = [
         "ask",
         "--json",
         ...instructionCliArgs("fx", options.instructions),
       ];
-      if (sessionId) {
-        args.push("--resume-id", sessionId);
+      if (options.model) {
+        args.push("--model", options.model);
       }
-      // Keep ask read-leaning: auto permission review, no yolo.
+      if (options.reasoning) {
+        args.push("--effort", options.reasoning);
+      }
+      if (sessionId) {
+        args.push("--resume", sessionId);
+      }
+      // Keep ask read-leaning: auto permission review, no full-access/yolo.
       args.push("--auto", "--", question);
 
       const env: NodeJS.ProcessEnv = { ...process.env };
-      if (options.model) {
-        env.FX_MODEL = options.model;
-      }
       // Prefer a tighter permission mode when the install supports it.
       if (!env.FX_PERMISSION_MODE) {
         env.FX_PERMISSION_MODE = "auto";
@@ -128,21 +201,9 @@ export function createFx(program: string): Harness {
 
       const stderrStr = Buffer.concat(stderrChunks).toString().trim();
 
-      let payload: {
-        output?: string;
-        exit_code?: number;
-        model?: string;
-        session_id?: string;
-        error?: string;
-      };
+      let payload: FxAskPayload;
       try {
-        // stdout may include notices before the JSON object — take the last {...}
-        const start = stdout.lastIndexOf("{");
-        const end = stdout.lastIndexOf("}");
-        if (start < 0 || end < start) {
-          throw new Error("no json");
-        }
-        payload = JSON.parse(stdout.slice(start, end + 1));
+        payload = parseFxAskJson(stdout);
       } catch {
         const detail = stderrStr || stdout.trim();
         throw new Error(
@@ -153,7 +214,11 @@ export function createFx(program: string): Harness {
       }
 
       if (payload.error) {
-        throw new Error(`fx error: ${payload.error}`);
+        // Surface stderr auth/credits guidance from the coding-agent gateway.
+        const detail = stderrStr
+          ? `${payload.error}: ${stderrStr}`
+          : payload.error;
+        throw new Error(`fx error: ${detail}`);
       }
 
       if (
@@ -163,11 +228,12 @@ export function createFx(program: string): Harness {
         throw new Error(
           stderrStr ||
             payload.output ||
+            payload.final_output ||
             `fx exited with code ${payload.exit_code ?? exitCode}`
         );
       }
 
-      const answer = (payload.output ?? "").trimEnd();
+      const answer = answerFromPayload(payload);
       if (!answer) {
         throw new Error("fx completed without returning an answer");
       }
